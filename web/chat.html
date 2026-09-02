@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Bella</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --text: #1c1c1e;
+    --dim: #6e6e73;
+    --bubble-user: #0a84ff;
+    --bubble-user-text: #ffffff;
+    --bubble-assistant: #e9e9eb;
+    --bubble-assistant-text: #1c1c1e;
+    --border: #d8d8dc;
+    --accent: #0a84ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --panel: #1c1c1e;
+      --text: #f2f2f7;
+      --dim: #8e8e93;
+      --bubble-assistant: #2c2c2e;
+      --bubble-assistant-text: #f2f2f7;
+      --border: #3a3a3c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 16px;
+    font-weight: 600;
+    font-size: 17px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #30d158;
+    display: inline-block;
+    margin-right: 8px;
+  }
+  header .status { font-size: 13px; color: var(--dim); font-weight: 400; }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .row { display: flex; }
+  .row.user { justify-content: flex-end; }
+  .row.assistant { justify-content: flex-start; }
+  .bubble {
+    max-width: 78%;
+    padding: 10px 14px;
+    border-radius: 18px;
+    font-size: 15px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .row.user .bubble {
+    background: var(--bubble-user);
+    color: var(--bubble-user-text);
+    border-bottom-right-radius: 4px;
+  }
+  .row.assistant .bubble {
+    background: var(--bubble-assistant);
+    color: var(--bubble-assistant-text);
+    border-bottom-left-radius: 4px;
+  }
+  .row.assistant .bubble.pending { color: var(--dim); font-style: italic; }
+  .row.assistant .bubble.error { background: #ff453a; color: white; }
+  form {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #text {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 10px 16px;
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+  }
+  button {
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 0 18px;
+    border-radius: 20px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; }
+</style>
+</head>
+<body>
+
+<header>
+  <div><span class="dot"></span>Bella</div>
+  <div class="status" id="status">connecting…</div>
+</header>
+
+<div id="log"></div>
+
+<form id="form">
+  <input id="text" type="text" placeholder="Message Bella…" autocomplete="off" autofocus>
+  <button id="send" type="submit">Send</button>
+</form>
+
+<script>
+(function () {
+  const log = document.getElementById('log');
+  const form = document.getElementById('form');
+  const input = document.getElementById('text');
+  const sendBtn = document.getElementById('send');
+  const statusEl = document.getElementById('status');
+
+  const TOKEN_KEY = 'jarvis_token';
+
+  function getToken() {
+    let t = localStorage.getItem(TOKEN_KEY);
+    if (!t) {
+      t = window.prompt('Enter your JARVIS_TOKEN (from .env on the Mac running jarvis):');
+      if (t) localStorage.setItem(TOKEN_KEY, t.trim());
+    }
+    return (t || '').trim();
+  }
+
+  function addBubble(role, text, cls) {
+    const row = document.createElement('div');
+    row.className = 'row ' + role;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble' + (cls ? ' ' + cls : '');
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+  }
+
+  async function checkHealth() {
+    try {
+      const r = await fetch('/health');
+      statusEl.textContent = r.ok ? 'online' : 'unreachable';
+    } catch (e) {
+      statusEl.textContent = 'unreachable';
+    }
+  }
+
+  async function sendMessage(text) {
+    addBubble('user', text);
+    const pending = addBubble('assistant', 'thinking…', 'pending');
+    sendBtn.disabled = true;
+
+    let token = getToken();
+    try {
+      const res = await fetch('/message', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + token,
+        },
+        body: JSON.stringify({ text }),
+      });
+
+      if (res.status === 401) {
+        localStorage.removeItem(TOKEN_KEY);
+        pending.textContent = 'Wrong token — tap Send again to re-enter it.';
+        pending.className = 'bubble error';
+        return;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        pending.textContent = 'Error ' + res.status + ': ' + body;
+        pending.className = 'bubble error';
+        return;
+      }
+
+      const data = await res.json();
+      pending.textContent = data.reply;
+      pending.className = 'bubble';
+    } catch (e) {
+      pending.textContent = 'Could not reach the server — is it running, and are you on the same network/Tailscale?';
+      pending.className = 'bubble error';
+    } finally {
+      sendBtn.disabled = false;
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    sendMessage(text);
+  });
+
+  checkHealth();
+  setInterval(checkHealth, 15000);
+})();
+</script>
+
+</body>
+</html>

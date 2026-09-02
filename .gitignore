@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Session/runtime state (local to this machine)
+sessions.db
+prompt_history
+
+# macOS
+.DS_Store
