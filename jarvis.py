@@ -363,6 +363,7 @@ def build_system_prompt(voice_mode: bool = False) -> str:
 - If the user mentions "volume", "louder", "quieter", "turn it up/down", "mute", "unmute" — call the `volume` tool. For "increase/raise/lower by N%", use action=adjust with percent=N.
 {spotify_rule}
 - If the user says "remind me", "set a reminder", "add a reminder", or similar — call the `reminder` tool (action=add), NEVER the `todo` tool (that's a separate local list the real Reminders app never sees). Compute any time the user gives ("at 8pm", "tomorrow morning", "in an hour") into an absolute due_date='YYYY-MM-DD HH:MM' yourself using the CURRENT DATE/TIME above — never guess or leave it symbolic. If no time is given, omit due_date. Report back only what the tool result actually confirms (added / due_date / list).
+- If the user says "upload to GitHub", "push to GitHub", "back this up", "sync to GitHub", or similar — call the `github` tool (action=upload). NEVER use `shell` to hand-run git/gh commands for this — the tool handles committing, first-time repo creation, and pushing in one step, and reports exactly what happened. If it fails (e.g. not authenticated), tell the user the real error and what to do (usually: run `gh auth login`) — do not claim it uploaded.
 - If a shell command fails, automatically try the next logical command. Do not stop and ask.
 - NEVER say "Would you like me to X?" or "Should I X?" — just do it.
 - NEVER list steps you plan to take. Execute them.
@@ -458,6 +459,7 @@ def on_tool_start(name: str, inputs: dict):
         "todo":         lambda: f"📋 {inputs.get('action', '')} {inputs.get('text') or inputs.get('position', '') or ''}".strip(),
         "reminder":     lambda: f"⏰ {inputs.get('action', '')} {inputs.get('text') or ''}".strip() + (f" @ {inputs['due_date']}" if inputs.get("due_date") else ""),
         "memory":       lambda: f"🧠 {inputs.get('action', '')} → {inputs.get('target', '')}",
+        "github":       lambda: f"🐙 {inputs.get('action', '')}",
         "recall":       lambda: f"🔎 recall: {inputs.get('query', '')}",
     }.get(name, lambda: json.dumps(inputs))()
 
@@ -518,6 +520,14 @@ def on_tool_end(name: str, result_str: str):
             chars = result.get("chars", 0)
             limit = result.get("limit", 0)
             console.print(f"  [dim green]✓ {chars}/{limit} chars[/dim green]")
+        elif "error" in result:
+            console.print(f"  [dim red]{result['error']}[/dim red]")
+
+    elif name == "github":
+        if result.get("success"):
+            url = result.get("remote_url") or result.get("repo_url")
+            extra = f" — {url}" if url else ""
+            console.print(f"  [dim green]✓{extra}[/dim green]")
         elif "error" in result:
             console.print(f"  [dim red]{result['error']}[/dim red]")
 
