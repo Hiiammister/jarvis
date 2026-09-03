@@ -64,7 +64,8 @@ def _get_db() -> sqlite3.Connection:
             session_id INTEGER NOT NULL REFERENCES sessions(id),
             ts         TEXT NOT NULL,
             role       TEXT NOT NULL,
-            content    TEXT NOT NULL
+            content    TEXT NOT NULL,
+            device     TEXT
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
             USING fts5(content, content='messages', content_rowid='id');
@@ -78,6 +79,10 @@ def _get_db() -> sqlite3.Connection:
                     VALUES ('delete', old.id, old.content);
             END;
     """)
+    # Idempotent migration for DBs created before the `device` column existed.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+    if "device" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN device TEXT")
     conn.commit()
     return conn
 
@@ -229,11 +234,11 @@ class Session:
         self.conn.commit()
         self.session_id = cur.lastrowid
 
-    def add_message(self, role: str, content: str) -> None:
+    def add_message(self, role: str, content: str, device: str | None = None) -> None:
         now = _utc_now_iso()
         self.conn.execute(
-            "INSERT INTO messages (session_id, ts, role, content) VALUES (?, ?, ?, ?)",
-            (self.session_id, now, role, content),
+            "INSERT INTO messages (session_id, ts, role, content, device) VALUES (?, ?, ?, ?, ?)",
+            (self.session_id, now, role, content, device),
         )
         self.conn.commit()
 

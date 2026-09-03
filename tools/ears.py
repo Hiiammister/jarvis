@@ -7,25 +7,23 @@ Self-contained by design, so it's trivial to rip back out:
     (thin PortAudio binding; `pip uninstall sounddevice` removes it clean —
     numpy is already part of the environment).
   - Exactly one function meant to be called from outside, `listen()`,
-    imported in exactly one place (jarvis.py — grep for "tools.ears").
-    It's called from the REPL's "listen" mode (the default), which loops
-    on it each turn instead of prompting for typed input.
+    imported in one place (bella/interfaces/voice.py — grep for "tools.ears").
+    It's used by the CLI's "listen" mode (the default), which loops on it
+    each turn instead of prompting for typed input.
   - Any failure (no mic permission, no key, network error, silence) returns
     "" rather than raising — a failed listen should feel like an empty
     prompt, never crash the REPL.
 
 To remove voice input entirely:
   1. rm tools/ears.py
-  2. In jarvis.py, delete the "from tools.ears import listen as listen_mic"
-     import, drop the "listen" branch of run_repl's mode loop (mode can
-     just stay "silent"), and drop the /listen slash command + spoken
-     mode-switch phrases.
+  2. Delete bella/interfaces/voice.py, drop the "listen" branch of
+     bella/interfaces/cli.py's run_repl (mode can just stay "silent"), and
+     drop the /listen slash command + spoken mode-switch phrases.
   3. pip uninstall sounddevice (optional — harmless to leave installed).
 
 Local-only, same as tools/voice.py: recording and transcription both happen
-on this machine. Deliberately NOT wired into server.py — a remote device
-(Windows/iPad/WhatsApp) has no way to reach this Mac's mic anyway, so
-there's nothing to route there.
+on this machine. Deliberately NOT wired into bella.server — a remote device
+(Windows/iPad/WhatsApp) has no way to reach this Mac's mic anyway.
 """
 
 import json
@@ -149,11 +147,14 @@ def _transcribe(audio: np.ndarray) -> str:
     return (result.get("text") or "").strip()
 
 
-def listen(stop_event=None, max_seconds: float = None) -> str:
+def listen(stop_event=None, max_seconds: float = None, timings=None) -> str:
     """Record one command from the mic and transcribe it. Returns the
     transcript, or "" on any failure (no mic access, no key, network error,
     nothing but silence/ambient noise, or `stop_event` cancelled it) —
     never raises.
+
+    `timings` (a bella.latency.Timings), if given, records the "record" and
+    "stt" spans separately so voice latency can be attributed.
 
     Deliberately skips calling the STT API at all when no sustained
     speech-level audio was detected, rather than trusting the API's own
@@ -162,12 +163,21 @@ def listen(stop_event=None, max_seconds: float = None) -> str:
     if not ELEVENLABS_API_KEY:
         return ""
     try:
+        if timings is not None:
+            timings.start("record")
         audio, speech_detected = _record_until_silence(stop_event=stop_event, max_seconds=max_seconds)
+        if timings is not None:
+            timings.stop("record")
         if stop_event is not None and stop_event.is_set():
             return ""
         if not speech_detected:
             return ""
-        return _transcribe(audio)
+        if timings is not None:
+            timings.start("stt")
+        text = _transcribe(audio)
+        if timings is not None:
+            timings.stop("stt")
+        return text
     except Exception:
         return ""
 

@@ -1,0 +1,4 @@
+# Bella desktop client — the only runtime dependency.
+websockets>=12,<17
+# optional, for `screenshot` on Windows:
+# mss>=9

@@ -5,27 +5,27 @@ speakers. Trial feature.
 Self-contained by design, so it's trivial to rip back out:
   - No new pip dependency (stdlib urllib/subprocess/tempfile only) — nothing
     to `pip uninstall`.
-  - Exactly one function, `speak()`, imported from exactly one place
-    (jarvis.py's REPL — grep for "tools.voice"). The REPL's silent/tts/listen
-    modes toggle output on or off per-turn by setting this module's
-    VOICE_ENABLED attribute directly (`_voice_mod.VOICE_ENABLED = ...`);
-    they don't change how speak() itself works.
+  - Exactly one function, `speak()`, imported from one place
+    (bella/interfaces/cli.py — grep for "tools.voice" / "tools import voice").
+    The REPL's silent/tts/listen modes toggle output on or off per-turn via
+    bella.interfaces.voice.set_voice_output(), which sets this module's
+    VOICE_ENABLED attribute directly; they don't change how speak() works.
   - Any failure (no key, network error, no speakers) is swallowed; jarvis
     behaves identically to before this file existed if you remove it.
 
 To remove voice entirely:
-  1. rm tools/voice.py
-  2. In jarvis.py, delete the "from tools import voice as _voice_mod" and
-     "from tools.voice import speak" imports, the two `_spawn_bg(speak, ...)`
-     call sites, and the `_voice_mod.VOICE_ENABLED = ...` lines in run_repl's
-     mode loop.
-  3. Remove ELEVENLABS_* / JARVIS_VOICE from .env (optional, harmless to
+  1. rm tools/voice.py tools/ears.py
+  2. In bella/interfaces/cli.py, drop the `from tools.voice import speak`
+     import and the two `runtime.spawn_bg(speak, ...)` call sites.
+  3. Delete bella/interfaces/voice.py and the "listen" branch of
+     bella/interfaces/cli.py's run_repl (mode can just stay "silent").
+  4. Remove ELEVENLABS_* / JARVIS_VOICE from .env (optional, harmless to
      leave).
 
-Deliberately NOT wired into server.py: voice is local-only. A message
-handled for a remote device (Windows/iPad/WhatsApp via server.py) never
-triggers audio, and no audio is ever sent back over the network — it only
-plays here, out loud, when you're driving jarvis directly from this Mac.
+Deliberately NOT wired into bella.server: voice is local-only. A message
+handled for a remote device (Windows/iPad/WhatsApp) never triggers audio,
+and no audio is ever sent back over the network — it only plays here, out
+loud, when you're driving Bella directly from this Mac.
 """
 
 import json
@@ -55,10 +55,13 @@ ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
 VOICE_ENABLED = os.getenv("JARVIS_VOICE", "").strip().lower() in ("1", "true", "yes")
 
 
-def speak(text: str) -> None:
+def speak(text: str, timings=None) -> None:
     """Speak `text` out loud via ElevenLabs TTS + `afplay`. Best-effort and
     silent on failure — voice is a nice-to-have, never something that
-    should break a turn or spam errors into the REPL."""
+    should break a turn or spam errors into the REPL.
+
+    `timings` (a bella.latency.Timings), if given, records "tts synth" (API)
+    and "tts playback" (afplay) spans separately."""
     if not VOICE_ENABLED:
         return
     text = (text or "").strip()
@@ -81,13 +84,21 @@ def speak(text: str) -> None:
                 "Accept": "audio/mpeg",
             },
         )
+        if timings is not None:
+            timings.start("tts synth")
         with urllib.request.urlopen(req, timeout=20) as resp:
             audio = resp.read()
+        if timings is not None:
+            timings.stop("tts synth")
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             f.write(audio)
             path = f.name
+        if timings is not None:
+            timings.start("tts playback")
         subprocess.run(["afplay", path], timeout=60, capture_output=True)
+        if timings is not None:
+            timings.stop("tts playback")
     except Exception:
         pass  # best-effort — never raise into the caller
     finally:

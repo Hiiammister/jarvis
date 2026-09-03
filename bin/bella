@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""bella — CLI launcher that runs from the repo without installation.
+
+    bin/bella                     text REPL
+    bin/bella voice               wake-word / listen mode
+    bin/bella serve               FastAPI server
+    bin/bella doctor              diagnostics
+    bin/bella "play some jazz"     single-shot request
+
+Symlink it onto your PATH (`ln -s "$PWD/bin/bella" ~/.local/bin/bella`), or
+install the project (`pip install -e .`) to get a real `bella` console script.
+"""
+
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
+
+from bella.cli_entry import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

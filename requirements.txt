@@ -6,4 +6,5 @@ prompt_toolkit==3.0.48
 google-search-results==2.4.2
 fastapi==0.141.1
 uvicorn[standard]==0.40.0
+websockets>=12,<17
 sounddevice==0.5.6

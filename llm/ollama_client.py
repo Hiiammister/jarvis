@@ -1,52 +1,51 @@
 """
-llm/ollama_client.py — Ollama client with streaming + tool-use agentic loop.
+llm/ollama_client.py — Ollama client: the full tool-calling agent loop plus a
+lightweight no-tools chat path.
+
+  run_agent_turn(...)   FULL_AGENT — streaming + tool-call loop, scoped tool set
+  run_fast_chat(...)    FAST_CHAT  — one streamed call, NO tools, small output cap
+
+Both share one `ollama.chat` entry point (`_chat`) so connection / retry /
+keep-alive / think-filter behaviour is defined once. Model / context / profile
+settings come from bella.config; num_ctx is held constant across every call so
+Ollama never has to reallocate the KV cache.
+
+Module constants MODEL / BASE_OPTIONS / NUM_CTX / NO_THINK are kept for
+backwards compatibility.
 """
 
-import os
+from __future__ import annotations
+
 import json
 from typing import Callable
 
 import ollama
 
-from tools.executor import TOOL_SCHEMAS, execute_tool
+from bella.config import get_config
+from bella.latency import NULL_TIMINGS, Timings
+from tools.registry import get_registry
+
+_cfg = get_config()
 
 DEFAULT_MODEL = "qwen3:8b"
-MODEL = os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
-
-# Keep num_ctx identical everywhere we talk to Ollama. Changing num_ctx between
-# calls forces Ollama to drop and re-allocate the model's KV cache, which adds
-# several seconds of "reload" latency to the next turn.
-NUM_CTX = int(os.getenv("CTX_SIZE", "4096"))
-NUM_PREDICT = int(os.getenv("MAX_TOKENS", "2048"))
-
-# Hard cap on tool-call round trips per turn so a confused model can't loop forever.
-MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "12"))
-
-BASE_OPTIONS = {
-    "num_predict": NUM_PREDICT,
-    "num_ctx": NUM_CTX,
-}
-
+MODEL = _cfg.ollama_model
+NUM_CTX = _cfg.ollama_ctx_size
+NUM_PREDICT = _cfg.max_tokens
+MAX_TOOL_ITERATIONS = _cfg.max_tool_iterations
+BASE_OPTIONS = _cfg.base_options
 # qwen3 etc. emit a long <think> preamble by default; disabling it is a big
 # latency win. Passed as a top-level kwarg (not an option) in ollama >= 0.5.
-NO_THINK = os.getenv("OLLAMA_THINK", "").lower() not in ("1", "true", "yes")
+NO_THINK = not _cfg.think
+KEEP_ALIVE = _cfg.keep_alive
 
 
-def _to_ollama_tools(schemas: list[dict]) -> list[dict]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": s["name"],
-                "description": s["description"],
-                "parameters": s["input_schema"],
-            },
-        }
-        for s in schemas
-    ]
+def _profile_options(profile: str) -> dict:
+    """num_predict for the given generation profile. num_ctx is unchanged."""
+    return {"num_ctx": _cfg.ollama_ctx_size, "num_predict": _cfg.profiles.tokens(profile)}
 
 
-OLLAMA_TOOLS = _to_ollama_tools(TOOL_SCHEMAS)
+def _ollama_tools(names: list[str] | None = None) -> list[dict]:
+    return get_registry().ollama_schemas(names)
 
 
 class _ThinkFilter:
@@ -78,18 +77,17 @@ class _ThinkFilter:
         return out
 
 
-def _chat_stream(messages: list[dict]):
-    """ollama.chat, retrying without `think` for models that reject the param."""
+def _chat(messages: list[dict], *, tools: list[dict] | None, options: dict, stream: bool = True):
+    """Single Ollama entry point. Retries without `think` for models that
+    reject the param. `keep_alive` keeps the model resident between requests."""
+    kwargs = dict(model=MODEL, messages=messages, stream=stream,
+                  options=options, keep_alive=KEEP_ALIVE)
+    if tools:
+        kwargs["tools"] = tools
     try:
-        return ollama.chat(
-            model=MODEL, messages=messages, tools=OLLAMA_TOOLS,
-            stream=True, think=not NO_THINK, options=BASE_OPTIONS,
-        )
+        return ollama.chat(think=not NO_THINK, **kwargs)
     except (ollama.ResponseError, TypeError):
-        return ollama.chat(
-            model=MODEL, messages=messages, tools=OLLAMA_TOOLS,
-            stream=True, options=BASE_OPTIONS,
-        )
+        return ollama.chat(**kwargs)
 
 
 def _coerce_args(raw) -> dict:
@@ -103,49 +101,131 @@ def _coerce_args(raw) -> dict:
     return {}
 
 
+def warmup() -> None:
+    """Fire a 1-token generation on startup so (a) the model is resident before
+    the first real request and (b) the FAST_CHAT system-prompt prefix is already
+    in Ollama's KV cache. Best-effort; never raises."""
+    try:
+        from bella.prompt import build_system_prompt
+
+        system = build_system_prompt(minimal=True)
+    except Exception:
+        system = "You are Bella."
+    try:
+        _chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": "hi"}],
+            tools=None,
+            options={"num_ctx": _cfg.ollama_ctx_size, "num_predict": 1},
+            stream=False,
+        )
+    except Exception:
+        pass
+
+
+# ── FAST_CHAT ──────────────────────────────────────────────────────────────
+
+def run_fast_chat(
+    messages: list[dict],
+    system: str,
+    on_text: Callable[[str], None],
+    *,
+    profile: str = "FAST",
+    timings: Timings | None = None,
+) -> str:
+    """One streamed model call, no tools, no loop. For conversational / language
+    requests the router decided need no tools. Returns the clean reply text."""
+    t = timings or NULL_TIMINGS
+    think = _ThinkFilter()
+    parts: list[str] = []
+    first_seen = False
+
+    try:
+        t.start("generation")
+        stream = _chat(
+            [{"role": "system", "content": system}] + list(messages),
+            tools=None, options=_profile_options(profile),
+        )
+        for chunk in stream:
+            piece = chunk.get("message", {}).get("content", "")
+            if not piece:
+                continue
+            if not first_seen:
+                first_seen = True
+                t.mark("ollama first token")
+            clean = think.feed(piece)
+            if clean:
+                on_text(clean)
+                parts.append(clean)
+    except Exception as e:
+        on_text(f"\n[Ollama error: {e}]\n")
+    finally:
+        t.stop("generation")
+
+    return "".join(parts).strip()
+
+
+# ── FULL_AGENT ─────────────────────────────────────────────────────────────
+
 def run_agent_turn(
     messages: list[dict],
     system: str,
     on_text: Callable[[str], None],
     on_tool_start: Callable[[str, dict], None],
     on_tool_end: Callable[[str, str], None],
+    *,
+    tools: list[str] | None = None,
+    profile: str = "DEEP",
+    timings: Timings | None = None,
+    execute_tool: Callable[[str, dict], str] | None = None,
 ) -> tuple[str, list[dict]]:
     """
     Run one full agentic turn until the model returns with no tool calls.
     Returns (final_text, updated_messages).
 
-    `final_text` and the stored assistant messages contain only user-visible
-    text — <think> spans are stripped so they don't pollute history or context.
+    `tools` is a list of tool *names* to expose (None = all). `execute_tool`
+    runs a tool call and returns a JSON string — defaults to the local registry,
+    but the server passes a device-aware gateway so device-local tools run on
+    the right client. `final_text` and the stored assistant messages contain
+    only user-visible text — <think> spans are stripped.
     """
+    t = timings or NULL_TIMINGS
     messages = list(messages)
+    registry = get_registry()
+    run_tool = execute_tool or registry.execute
+    tool_schemas = _ollama_tools(tools)
+    options = _profile_options(profile)
     think = _ThinkFilter()
     final_text_parts: list[str] = []
+    first_seen = False
 
     for _iteration in range(MAX_TOOL_ITERATIONS):
         clean_parts: list[str] = []
         tool_calls: list = []
 
         try:
-            stream = _chat_stream(
-                [{"role": "system", "content": system}] + messages
+            t.start("generation")
+            stream = _chat(
+                [{"role": "system", "content": system}] + messages,
+                tools=tool_schemas, options=options,
             )
-
             for chunk in stream:
                 msg = chunk.get("message", {})
-
                 content = msg.get("content", "")
                 if content:
+                    if not first_seen:
+                        first_seen = True
+                        t.mark("ollama first token")
                     clean = think.feed(content)
                     if clean:
                         on_text(clean)
                         clean_parts.append(clean)
-
                 if msg.get("tool_calls"):
                     tool_calls.extend(msg["tool_calls"])
-
         except Exception as e:
             on_text(f"\n[Ollama error: {e}]\n")
+            t.stop("generation")
             break
+        t.stop("generation")
 
         clean_text = "".join(clean_parts)
         assistant_msg: dict = {"role": "assistant", "content": clean_text}
@@ -165,7 +245,9 @@ def run_agent_turn(
             tool_input = _coerce_args(fn.get("arguments", {}))
 
             on_tool_start(tool_name, tool_input)
-            result_str = execute_tool(tool_name, tool_input)
+            t.start(f"tool: {tool_name}")
+            result_str = run_tool(tool_name, tool_input)
+            t.stop(f"tool: {tool_name}")
             on_tool_end(tool_name, result_str)
 
             messages.append(

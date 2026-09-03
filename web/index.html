@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d0e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bella">
+<link rel="manifest" href="/manifest.json">
+<link rel="stylesheet" href="/styles.css">
+<title>Bella</title>
+</head>
+<body>
+
+<header>
+  <span class="brand">BELLA</span>
+  <span class="tag">Personal AI Workstation</span>
+  <div class="meta">
+    <span><span class="statusdot" id="dot"></span><b id="conn">connecting</b></span>
+    <span>Device <b id="device">–</b></span>
+    <span>Model <b id="model">–</b></span>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="log"></div>
+  <aside id="panel">
+    <h3>Connected devices</h3>
+    <div id="devices"></div>
+    <h3 style="margin-top:16px">Server</h3>
+    <div class="dev"><span class="s" id="srvstat">–</span></div>
+  </aside>
+</div>
+
+<form id="form">
+  <textarea id="text" rows="1" placeholder="Ask Bella…" autocomplete="off" autofocus></textarea>
+  <button id="send" type="submit">Send</button>
+</form>
+
+<script src="/app.js"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
+</script>
+</body>
+</html>
